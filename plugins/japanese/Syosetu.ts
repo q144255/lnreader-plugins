@@ -1,5 +1,5 @@
 import { CheerioAPI, load as loadCheerio } from 'cheerio';
-import { fetchText } from '@/lib/fetch';
+import { fetchText } from '@libs/fetch';
 import { Plugin } from '@/types/plugin';
 import { defaultCover } from '@libs/defaultCover';
 import { FilterTypes, Filters } from '@libs/filterInputs';
