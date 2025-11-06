@@ -1,12 +1,9 @@
-import { load as loadCheerio } from 'cheerio';
-import { fetchApi } from '@libs/fetch';
+import { CheerioAPI, load as loadCheerio } from 'cheerio';
+import { fetchText } from '@/lib/fetch';
 import { Plugin } from '@/types/plugin';
 import { defaultCover } from '@libs/defaultCover';
 import { FilterTypes, Filters } from '@libs/filterInputs';
 import { NovelStatus } from '@libs/novelStatus';
-// const novelStatus = require('@/types/constants');
-// const isUrlAbsolute = require('@/lib/utils');
-// const parseDate = require('@libs/parseDate');
 
 class Syosetu implements Plugin.PluginBase {
   id = 'yomou.syosetu';
@@ -14,11 +11,10 @@ class Syosetu implements Plugin.PluginBase {
   icon = 'src/jp/syosetu/icon.png';
   site = 'https://yomou.syosetu.com/';
   novelPrefix = 'https://ncode.syosetu.com';
-  version = '1.1.2';
-  headers = {
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  };
+  version = '1.2.0';
+  imageRequestInit?: Plugin.ImageRequestInit | undefined = undefined;
+  webStorageUtilized?: boolean;
+
   searchUrl = (pagenum?: number, order?: string) => {
     return `${this.site}search.php?order=${order || 'hyoka'}${
       pagenum !== undefined
@@ -43,11 +39,8 @@ class Syosetu implements Plugin.PluginBase {
           filters.modifier.value === 'total' ? '' : `_${filters.modifier.value}`
         }/?p=${pagenumber}`;
       }
-      const html = await (await fetchApi(url)).text();
-
-      const loadedCheerio = loadCheerio(html, {
-        decodeEntities: false,
-      });
+      const html = await fetchText(url);
+      const loadedCheerio = loadCheerio(html);
 
       if (parseInt(loadedCheerio('.is-current').html() || '1') !== pagenumber)
         return [];
@@ -70,9 +63,9 @@ class Syosetu implements Plugin.PluginBase {
     const novels = await getNovelsFromPage(pageNo);
     return novels;
   }
-  private async parseChaptersFromPage(
-    loadedCheerio: cheerio.CheerioAPI,
-  ): Promise<Plugin.ChapterItem[]> {
+  private parseChaptersFromPage(
+    loadedCheerio: CheerioAPI,
+  ): Plugin.ChapterItem[] {
     const chapters: Plugin.ChapterItem[] = [];
 
     loadedCheerio('.p-eplist__sublist').each((_, element) => {
@@ -97,191 +90,177 @@ class Syosetu implements Plugin.PluginBase {
 
     return chapters;
   }
-  async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
-    // First fetch main page
-    const result = await fetchApi(this.novelPrefix + novelPath, {
-      headers: this.headers,
+
+  private async fetchNovelMetadata(novelPath: string): Promise<{
+    name: string;
+    author: string;
+    summary: string;
+    genres: string;
+    isShortStory: boolean;
+    status: string;
+  }> {
+    const infotopUrl = `${this.novelPrefix}/novelview/infotop/ncode${novelPath}`;
+    const infotopBody = await fetchText(infotopUrl);
+    const infotopCheerio = loadCheerio(infotopBody);
+
+    // Parse basic info
+    const name = infotopCheerio('.p-infotop-title a').text().trim();
+    let author = '';
+    let summary = '';
+    let genres = '';
+
+    // Parse data fields
+    infotopCheerio('.p-infotop-data dt').each((_, dt) => {
+      const title = infotopCheerio(dt).text().trim();
+      const value = infotopCheerio(dt).next('dd');
+
+      if (title === '作者名') {
+        author = value.text().trim();
+      } else if (title === 'あらすじ') {
+        summary = value.text().trim();
+      } else if (title === 'キーワード') {
+        genres = value.text().trim().replace(/\s+/g, ',');
+      }
     });
-    const body = await result.text();
-    const loadedCheerio = loadCheerio(body, { decodeEntities: false });
+
+    // Check type (short story or serialized)
+    const typeText = infotopCheerio('.p-infotop-type__type').text().trim();
+    const isShortStory = typeText === '短編';
 
     // Parse status
-    let status = 'Unknown';
-    if (
-      loadedCheerio('.c-announce').text().includes('連載中') ||
-      loadedCheerio('.c-announce').text().includes('未完結')
-    ) {
+    let status: string = NovelStatus.Unknown;
+    if (typeText.indexOf('連載中') !== -1) {
       status = NovelStatus.Ongoing;
-    } else if (
-      loadedCheerio('.c-announce').text().includes('更新されていません')
-    ) {
-      status = NovelStatus.OnHiatus;
-    } else if (loadedCheerio('.c-announce').text().includes('完結')) {
+    } else if (typeText.indexOf('完結済') !== -1 || isShortStory) {
       status = NovelStatus.Completed;
     }
 
-    // Create novel object with metadata
-    const novel: Plugin.SourceNovel = {
-      path: novelPath,
-      name: loadedCheerio('.p-novel__title').text(),
-      author: loadedCheerio('.p-novel__author')
-        .text()
-        .replace('作者：', '')
-        .trim(),
-      status: status,
-      artist: '',
-      cover: defaultCover,
-      chapters: [],
-      genres: loadedCheerio('meta[property="og:description"]')
-        .attr('content')
-        ?.split(' ')
-        .join(','), // Get genres from meta tag
-    };
+    return { name, author, summary, genres, isShortStory, status };
+  }
 
-    // Get summary if available
-    novel.summary = loadedCheerio('#novel_ex').html() || '';
+  private async fetchSerializedChapters(
+    novelPath: string,
+  ): Promise<Plugin.ChapterItem[]> {
+    const novelBody = await fetchText(this.novelPrefix + novelPath);
+    const novelCheerio = loadCheerio(novelBody);
 
     const chapters: Plugin.ChapterItem[] = [];
 
     // Get last page URL first
-    const lastPageLink = loadedCheerio('.c-pager__item--last').attr('href');
+    const lastPageLink = novelCheerio('.c-pager__item--last').attr('href');
 
     if (!lastPageLink) {
       // If no pagination, just parse chapters from the current page
-      loadedCheerio('.p-eplist__sublist').each((_, element) => {
-        const chapterLink = loadedCheerio(element).find('a');
-        const chapterUrl = chapterLink.attr('href');
-        const chapterName = chapterLink.text().trim();
-        const releaseDate = loadedCheerio(element)
-          .find('.p-eplist__update')
-          .text()
-          .trim()
-          .split(' ')[0]
-          .replace(/\//g, '-');
-
-        if (chapterUrl) {
-          chapters.push({
-            name: chapterName,
-            releaseTime: releaseDate,
-            path: chapterUrl.replace(this.novelPrefix, ''),
-          });
-        }
-      });
+      return this.parseChaptersFromPage(novelCheerio);
     } else {
       const lastPageMatch = lastPageLink.match(/\?p=(\d+)/);
       const totalPages = lastPageMatch ? parseInt(lastPageMatch[1]) : 1;
 
       // Fetch all pages in parallel for better performance
       const pagePromises = Array.from({ length: totalPages }, (_, i) =>
-        fetchApi(`${this.novelPrefix}${novelPath}?p=${i + 1}`).then(r =>
-          r.text(),
-        ),
+        fetchText(`${this.novelPrefix}${novelPath}?p=${i + 1}`),
       );
 
       const pageResults = await Promise.all(pagePromises);
 
       // Process each page's chapters
-      pageResults.forEach(pageBody => {
-        const pageCheerio = loadCheerio(pageBody, { decodeEntities: false });
-        pageCheerio('.p-eplist__sublist').each((_, element) => {
-          const chapterLink = pageCheerio(element).find('a');
-          const chapterUrl = chapterLink.attr('href');
-          const chapterName = chapterLink.text().trim();
-          const releaseDate = pageCheerio(element)
-            .find('.p-eplist__update')
-            .text()
-            .trim()
-            .split(' ')[0]
-            .replace(/\//g, '-');
-
-          if (chapterUrl) {
-            chapters.push({
-              name: chapterName,
-              releaseTime: releaseDate,
-              path: chapterUrl.replace(this.novelPrefix, ''),
-            });
-          }
-        });
+      pageResults.forEach((pageBody: string) => {
+        const pageCheerio = loadCheerio(pageBody);
+        const pageChapters = this.parseChaptersFromPage(pageCheerio);
+        chapters.push(...pageChapters);
       });
+
+      return chapters;
+    }
+  }
+  async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
+    // Fetch metadata from infotop page
+    const metadata = await this.fetchNovelMetadata(novelPath);
+
+    // Create novel object with metadata
+    const novel: Plugin.SourceNovel = {
+      path: novelPath,
+      name: metadata.name,
+      author: metadata.author,
+      summary: metadata.summary,
+      status: metadata.status,
+      artist: '',
+      cover: defaultCover,
+      chapters: [],
+      genres: metadata.genres,
+    };
+
+    // Handle short story vs serialized novel
+    if (metadata.isShortStory) {
+      // Short story - create single chapter
+      novel.chapters = [
+        {
+          name: metadata.name,
+          path: novelPath,
+          releaseTime: '',
+        },
+      ];
+    } else {
+      // Serialized novel - fetch chapter list
+      novel.chapters = await this.fetchSerializedChapters(novelPath);
     }
 
-    novel.chapters = chapters;
     return novel;
   }
   async parseChapter(chapterPath: string): Promise<string> {
-    const result = await fetchApi(this.novelPrefix + chapterPath, {
-      headers: this.headers,
-    });
-    const body = await result.text();
-
-    const cheerioQuery = loadCheerio(body, {
-      decodeEntities: false,
-    });
+    const body = await fetchText(this.novelPrefix + chapterPath);
+    const cheerioQuery = loadCheerio(body);
 
     // Get the chapter title
     const chapterTitle = cheerioQuery('.p-novel__title').html() || '';
 
-    // Get the chapter content
-    const chapterContent =
-      cheerioQuery(
-        '.p-novel__body .p-novel__text:not([class*="p-novel__text--"])',
-      ).html() || '';
+    // Get the chapter content, excluding preface and afterword
+    const chapterContent: string[] = [];
+    cheerioQuery('.p-novel__body .p-novel__text').each((_, element) => {
+      const className = cheerioQuery(element).attr('class') || '';
+      // Skip elements with p-novel__text--preface or p-novel__text--afterword
+      if (
+        className.indexOf('p-novel__text--preface') === -1 &&
+        className.indexOf('p-novel__text--afterword') === -1
+      ) {
+        const html = cheerioQuery(element).html();
+        if (html) {
+          chapterContent.push(html);
+        }
+      }
+    });
 
     // Combine title and content with proper HTML structure
-    return `<h1>${chapterTitle}</h1>${chapterContent}`;
+    const chapterText = `
+    <div>
+      <h1>${chapterTitle}</h1>
+    </div>
+    <p><br><br></p>
+    ${chapterContent.join('')}`;
+    return chapterText;
   }
   async searchNovels(
     searchTerm: string,
     pageNo: number,
   ): Promise<Plugin.NovelItem[]> {
-    let novels = [];
+    const url = this.searchUrl(pageNo) + `&word=${searchTerm}`;
+    const body = await fetchText(url);
+    const cheerioQuery = loadCheerio(body);
 
-    // returns list of novels from given page
-    const getNovelsFromPage = async (pagenumber: number) => {
-      // load page
-      const url = this.searchUrl(pagenumber) + `&word=${searchTerm}`;
-      const result = await fetchApi(url, { headers: this.headers });
-      const body = await result.text();
-      // Cheerio it!
-      const cheerioQuery = loadCheerio(body, { decodeEntities: false });
+    const novels: Plugin.NovelItem[] = [];
+    cheerioQuery('.searchkekka_box').each((_, e) => {
+      const novelDIV = cheerioQuery(e).find('.novel_h');
+      const novelA = novelDIV.children()[0];
+      const novelPath = novelA.attribs.href.replace(this.novelPrefix, '');
+      if (novelPath) {
+        novels.push({
+          name: novelDIV.text(),
+          path: novelPath,
+          cover: defaultCover,
+        });
+      }
+    });
 
-      const pageNovels: Plugin.NovelItem[] = [];
-      // find class=searchkekka_box
-      cheerioQuery('.searchkekka_box').each((i, e) => {
-        // get div with link and name
-        const novelDIV = cheerioQuery(e).find('.novel_h');
-        // get link element
-        const novelA = novelDIV.children()[0];
-        // add new novel to array
-        const novelPath = novelA.attribs.href.replace(this.novelPrefix, '');
-        if (novelPath) {
-          pageNovels.push({
-            name: novelDIV.text(), // get the name
-            path: novelPath, // get last part of the link
-            cover: defaultCover,
-          });
-        }
-      });
-      // return all novels from this page
-      return pageNovels;
-    };
-
-    // counter of loaded pages
-    // let pagesLoaded = 0;
-    // do {
-    //     // always load first one
-    //     novels.push(...(await getNovelsFromPage(pagesLoaded + 1)));
-    //     pagesLoaded++;
-    // } while (pagesLoaded < maxPageLoad && isNext); // check if we should load more
-
-    novels = await getNovelsFromPage(pageNo);
-
-    /** Use
-     * novels.push(...(await getNovelsFromPage(pageNumber)))
-     * if you want to load more
-     */
-
-    // respond with novels!
     return novels;
   }
 
