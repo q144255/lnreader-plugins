@@ -11,9 +11,14 @@ class Syosetu implements Plugin.PluginBase {
   icon = 'src/jp/syosetu/icon.png';
   site = 'https://yomou.syosetu.com/';
   novelPrefix = 'https://ncode.syosetu.com';
-  version = '1.2.0';
+  version = '1.2.1';
   imageRequestInit?: Plugin.ImageRequestInit | undefined = undefined;
   webStorageUtilized?: boolean;
+
+  private headers = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0',
+  };
 
   searchUrl = (pagenum?: number, order?: string) => {
     return `${this.site}search.php?order=${order || 'hyoka'}${
@@ -39,7 +44,7 @@ class Syosetu implements Plugin.PluginBase {
           filters.modifier.value === 'total' ? '' : `_${filters.modifier.value}`
         }/?p=${pagenumber}`;
       }
-      const html = await fetchText(url);
+      const html = await fetchText(url, { headers: this.headers });
       const loadedCheerio = loadCheerio(html);
 
       if (parseInt(loadedCheerio('.is-current').html() || '1') !== pagenumber)
@@ -100,7 +105,7 @@ class Syosetu implements Plugin.PluginBase {
     status: string;
   }> {
     const infotopUrl = `${this.novelPrefix}/novelview/infotop/ncode${novelPath}`;
-    const infotopBody = await fetchText(infotopUrl);
+    const infotopBody = await fetchText(infotopUrl, { headers: this.headers });
     const infotopCheerio = loadCheerio(infotopBody);
 
     // Parse basic info
@@ -141,7 +146,9 @@ class Syosetu implements Plugin.PluginBase {
   private async fetchSerializedChapters(
     novelPath: string,
   ): Promise<Plugin.ChapterItem[]> {
-    const novelBody = await fetchText(this.novelPrefix + novelPath);
+    const novelBody = await fetchText(this.novelPrefix + novelPath, {
+      headers: this.headers,
+    });
     const novelCheerio = loadCheerio(novelBody);
 
     const chapters: Plugin.ChapterItem[] = [];
@@ -158,7 +165,9 @@ class Syosetu implements Plugin.PluginBase {
 
       // Fetch all pages in parallel for better performance
       const pagePromises = Array.from({ length: totalPages }, (_, i) =>
-        fetchText(`${this.novelPrefix}${novelPath}?p=${i + 1}`),
+        fetchText(`${this.novelPrefix}${novelPath}?p=${i + 1}`, {
+          headers: this.headers,
+        }),
       );
 
       const pageResults = await Promise.all(pagePromises);
@@ -208,7 +217,9 @@ class Syosetu implements Plugin.PluginBase {
     return novel;
   }
   async parseChapter(chapterPath: string): Promise<string> {
-    const body = await fetchText(this.novelPrefix + chapterPath);
+    const body = await fetchText(this.novelPrefix + chapterPath, {
+      headers: this.headers,
+    });
     const cheerioQuery = loadCheerio(body);
 
     // Get the chapter title
@@ -244,7 +255,7 @@ class Syosetu implements Plugin.PluginBase {
     pageNo: number,
   ): Promise<Plugin.NovelItem[]> {
     const url = this.searchUrl(pageNo) + `&word=${searchTerm}`;
-    const body = await fetchText(url);
+    const body = await fetchText(url, { headers: this.headers });
     const cheerioQuery = loadCheerio(body);
 
     const novels: Plugin.NovelItem[] = [];
