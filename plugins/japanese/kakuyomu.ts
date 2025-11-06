@@ -90,58 +90,28 @@ class KakuyomuPlugin implements Plugin.PluginBase {
     );
     const apolloState = json?.props?.pageProps?.__APOLLO_STATE__ ?? {};
 
-    const work = Object.values(apolloState).find(
-      v =>
-        typeof v === 'object' &&
-        v !== null &&
-        '__typename' in v &&
-        v.__typename === 'Work' &&
-        'id' in v &&
-        v.id === novelPath.replace('/works/', ''),
-    ) as Work;
+    const workId = novelPath.replace('/works/', '');
+    const work = Object.values(apolloState).find(v => {
+      if (!hasTypeName(v, 'Work')) return false;
+      const obj = v as { id?: unknown };
+      return obj.id === workId;
+    }) as Work;
 
-    const author = Object.values(apolloState).find(
-      v =>
-        typeof v === 'object' &&
-        v !== null &&
-        '__typename' in v &&
-        v.__typename === 'UserAccount' &&
-        'id' in v &&
-        v.id === work.author.__ref.replace('UserAccount:', ''),
-    ) as UserAccount;
+    const authorId = work.author.__ref.replace('UserAccount:', '');
+    const author = Object.values(apolloState).find(v => {
+      if (!hasTypeName(v, 'UserAccount')) return false;
+      const obj = v as { id?: unknown };
+      return obj.id === authorId;
+    }) as UserAccount;
 
-    const chapters = Object.values(apolloState).filter(v => {
-      if (
-        typeof v === 'object' &&
-        v !== null &&
-        '__typename' in v &&
-        v.__typename === 'Chapter'
-      ) {
-        return true;
-      }
-    }) as Chapter[];
+    const chapters = filterByTypeName<Chapter>(apolloState, 'Chapter');
 
-    const tableOfContentsChapter = Object.values(apolloState).filter(v => {
-      if (
-        typeof v === 'object' &&
-        v !== null &&
-        '__typename' in v &&
-        v.__typename === 'TableOfContentsChapter'
-      ) {
-        return true;
-      }
-    }) as TableOfContentsChapter[];
+    const tableOfContentsChapter = filterByTypeName<TableOfContentsChapter>(
+      apolloState,
+      'TableOfContentsChapter',
+    );
 
-    const episodes = Object.values(apolloState).filter(v => {
-      if (
-        typeof v === 'object' &&
-        v !== null &&
-        '__typename' in v &&
-        v.__typename === 'Episode'
-      ) {
-        return true;
-      }
-    }) as Episode[];
+    const episodes = filterByTypeName<Episode>(apolloState, 'Episode');
 
     const joinChapters: {
       chapter: Chapter | undefined;
@@ -215,18 +185,8 @@ class KakuyomuPlugin implements Plugin.PluginBase {
     const json = JSON.parse(
       $('script#__NEXT_DATA__[type="application/json"]').html() || '{}',
     );
-    const works = Object.values(
-      json?.props?.pageProps?.__APOLLO_STATE__ ?? {},
-    ).filter(v => {
-      if (
-        typeof v === 'object' &&
-        v !== null &&
-        '__typename' in v &&
-        v.__typename === 'Work'
-      ) {
-        return true;
-      }
-    }) as Work[];
+    const apolloState = json?.props?.pageProps?.__APOLLO_STATE__ ?? {};
+    const works = filterByTypeName<Work>(apolloState, 'Work');
 
     const novels: Plugin.NovelItem[] = works.map(v => ({
       name: v.title ?? '',
@@ -275,3 +235,23 @@ type TableOfContentsChapter = {
     __ref: string;
   }[];
 };
+
+// Type guard functions
+function isApolloObject(
+  v: unknown,
+): v is { __typename: string; [key: string]: unknown } {
+  return typeof v === 'object' && v !== null && '__typename' in v;
+}
+
+function hasTypeName(v: unknown, typeName: string): boolean {
+  return isApolloObject(v) && v.__typename === typeName;
+}
+
+function filterByTypeName<T>(
+  apolloState: Record<string, unknown>,
+  typeName: string,
+): T[] {
+  return Object.values(apolloState).filter(v =>
+    hasTypeName(v, typeName),
+  ) as T[];
+}
